@@ -23,21 +23,30 @@ VoodooI2C is designed to run on the vast majority of modern systems. However, th
 	4. 7 - Kaby Lake
 	5. 8 - Kaby Lake R/Coffee Lake/Cannon Lake/Whiskey Lake
 	6. 10 - Comet Lake
+	7. 11 - Tiger Lake
+	8. 12 - Alder Lake
+	9. 13 - Raptor Lake
 If the number is not **at least** 4 then your system is not suitable for VoodooI2C.kext.
 
 2. If your machine shipped with Windows then the minimum required version of Windows is Windows 7. If your machine shipped with a previous version of Windows then it is unlikely that your machine will be supported by VoodooI2C. If your machine did not ship with Windows (for example, it may have shipped with Linux or with no preinstalled OS) then you may skip this requirement.
 
 3. Your machine should have at least one supported I2C controller. The following are the device IDs of the supported controllers:
 
-	1. 'INT33C2' and 'INT33C3' - Haswell era
-	2. 'INT3432' and 'INT3433' - Broadwell era
-	3. 'pci8086,9d60', 'pci8086,9d61', 'pci8086,9d62' and 'pci8086,9d63' - Skylake era
-	4. 'pci8086,a160', 'pci8086,a161', 'pci8086,a162' and 'pci8086,a163' - Kaby Lake era
-	5. 'pci8086,9de8', 'pci8086,9de9', 'pci8086,9dea' and 'pci8086,9deb' - Cannon Lake/Whiskey Lake era
-	6. 'pci8086,a368', 'pci8086,a369', 'pci8086,a36a' and 'pci8086,a36b' - Coffee Lake era
-	7. 'pci8086,2e8', 'pci8086,2e9', 'pci8086,2ea', 'pci8086,2eb',
-	   'pci8086,6e8', 'pci8086,6e9', 'pci8086,6ea' and 'pci8086,6eb' - Comet Lake era
-	8. 'pci8086,34e8', 'pci8086,34e9', 'pci8086,34ea' and 'pci8086,34eb' - Ice Lake era
+	1. `INT33C2` and `INT33C3` - Haswell era
+	2. `INT3432` and `INT3433` - Broadwell era
+	3. `pci8086,9d60`, `pci8086,9d61`, `pci8086,9d62` and `pci8086,9d63` - Skylake era
+	4. `pci8086,a160`, `pci8086,a161`, `pci8086,a162` and `pci8086,a163` - Kaby Lake era
+	5. `pci8086,9de8`, `pci8086,9de9`, `pci8086,9dea` and `pci8086,9deb` - Cannon Lake/Whiskey Lake era
+	6. `pci8086,a368`, `pci8086,a369`, `pci8086,a36a` and `pci8086,a36b` - Coffee Lake era
+	7. `pci8086,2e8`, `pci8086,2e9`, `pci8086,2ea`, `pci8086,2eb`,
+	   `pci8086,6e8`, `pci8086,6e9`, `pci8086,6ea` and `pci8086,6eb` - Comet Lake era
+	8. `pci8086,34e8`, `pci8086,34e9`, `pci8086,34ea` and `pci8086,34eb` - Ice Lake era
+	9. `pci8086,a0e8`, `pci8086,a0e9`, `pci8086,a0ea`, `pci8086,a0eb`, 
+	   `pci8086,43e8`, `pci8086,43e9`, `pci8086,43ea` and `pci8086,43eb` - Tiger Lake era
+	10. `pci8086,51e8`, `pci8086,51e9`, `pci8086,51ea`, `pci8086,51eb`,
+	    `pci8086,7acc`, `pci8086,7acd`, `pci8086,7ace`, `pci8086,7acf`,
+		`pci8086,54e8`, `pci8086,54e9`, `pci8086,54ea` and `pci8086,54eb` - Alder Lake era
+	11. `pci8086,7a4c`, `pci8086,7a4d`, `pci8086,7a4e` and `pci8086,7a4f` - Raptor Lake era
 
 4. Your machine should have at least one supported I2C device. For the vast majority of users, this will be an I2C-HID device. Examples of I2C-HID devices include Precision touchpads, touchscreens and sensor hubs.
 
@@ -75,7 +84,7 @@ You can think of polling mode as the "safe boot" mode of VoodooI2C. As such it i
 
 However, it is highly recommended that once your system is up and running, you should apply all the GPIO patches (except Haswell and Broadwell users) to ensure optimal performance. If you find that you cannot get your trackpad to work in interrupts mode or that interrupts mode leads to high CPU usage then it is likely you have a system with a buggy implementation of GPIO. In this case you will have to switch back to polling mode. In any case, you should still go through the troubleshooting process as outlined on the <Troubleshooting> page to make sure that you have not made a mistake.
 
-Staring from 2.5.3, VooodooI2C will try to extract GPIO pin information on compatible machine if APIC interrupt is unavailable. In case it's not working, you can force polling mode by adding `-vi2c-force-polling` to `boot-arg` or adding `force-polling` to specific I2C controller in `Devices`-`Properties` section for Clover or `DeviceProperties` section for OpenCore.
+Starting from 2.5.3, VoodooI2C will try to extract GPIO pin information on compatible machine if APIC interrupt is unavailable. In case it's not working, you can force polling mode by adding `-vi2c-force-polling` to `boot-arg` or adding `force-polling` to specific I2C controller in `Devices`-`Properties` section for Clover or `DeviceProperties` section for OpenCore. See <Polling Mode> for details.
 
 ### Windows Patches
 
