@@ -202,7 +202,6 @@ IOReturn VoodooI2CControllerDriver::setBusConfigProperties() {
 }
 
 void VoodooI2CControllerDriver::handleAbortI2C() {
-    IOLog("%s::%s handleAbort entered\n", getName(), bus_device.name);
     IOLog("%s::%s I2C Transaction error details\n", getName(), bus_device.name);
 
     if (bus_device.abort_source & DW_IC_TX_ABRT_7B_ADDR_NOACK)
@@ -229,7 +228,6 @@ void VoodooI2CControllerDriver::handleAbortI2C() {
         IOLog("%s::%s lost arbitration\n", getName(), bus_device.name);
 
     IOLog("%s::%s I2C Transaction error: 0x%08x - aborting\n", getName(), bus_device.name, bus_device.abort_source);
-    setProperty("DBG_TX_ABRT_SOURCE", bus_device.abort_source, 32);
 }
 
 void VoodooI2CControllerDriver::handleInterrupt(OSObject* target, void* refCon, IOService* nubDevice, int source) {
@@ -354,21 +352,17 @@ IOReturn VoodooI2CControllerDriver::prepareTransferI2C(VoodooI2CControllerBusMes
      */
     toggleBusState(kVoodooI2CStateOff);
 
-    if (bus_device.message_error) {
-        setProperty("VoodooI2C_Driver_prepare_MsgErr", bus_device.message_error, 32);
+    if (bus_device.message_error)
         return kIOReturnError;
-    }
 
     if (!bus_device.command_error)
         return kIOReturnSuccess;
 
     if (bus_device.command_error == DW_IC_ERR_TX_ABRT) {
-        setProperty("VoodooI2C_Driver_prepare_AbortSource", bus_device.abort_source, 32);
         handleAbortI2C();
         return kIOReturnError;
     }
 
-    setProperty("VoodooI2C_Driver_prepare_CmdErr", bus_device.command_error, 32);
     return kIOReturnNotReady;
 }
 

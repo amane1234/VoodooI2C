@@ -433,6 +433,25 @@ IOReturn VoodooI2CDeviceNub::callPlatformFunction(const OSSymbol *functionName,
     return super::callPlatformFunction(functionName, waitForFunction, param1, param2, param3, param4);
 }
 
+// Declared as an override in the header, so it has to be defined: otherwise the vtable references a
+// missing symbol and the kext fails to link. Forward to the OSSymbol variant like IOService does.
+IOReturn VoodooI2CDeviceNub::callPlatformFunction(const char *functionName,
+                                                  bool waitForFunction,
+                                                  void *param1,
+                                                  void *param2,
+                                                  void *param3,
+                                                  void *param4) {
+    if (!functionName)
+        return kIOReturnBadArgument;
+
+    const OSSymbol *symbol = OSSymbol::withCString(functionName);
+    if (!symbol)
+        return kIOReturnNoMemory;
+
+    IOReturn ret = callPlatformFunction(symbol, waitForFunction, param1, param2, param3, param4);
+    symbol->release();
+    return ret;
+}
 
 IOReturn VoodooI2CDeviceNub::transferI2CToAddress(VoodooI2CAddressedTransfer *request) {
     if (!request || request->address > 0x7F) {
@@ -450,7 +469,9 @@ IOReturn VoodooI2CDeviceNub::transferI2CToAddress(VoodooI2CAddressedTransfer *re
         return kIOReturnNotReady;
     }
 
-    UInt16 flags = use_10bit_addressing ? I2C_M_TEN : 0;
+    // The request carries a 7-bit address (checked above). Do not inherit this nub's 10-bit mode:
+    // I2C_M_TEN with a 7-bit address would put a different address on the bus.
+    UInt16 flags = 0;
     UInt16 readFlags = flags | I2C_M_RD;
     IOReturn ret = kIOReturnError;
 
@@ -458,24 +479,24 @@ IOReturn VoodooI2CDeviceNub::transferI2CToAddress(VoodooI2CAddressedTransfer *re
         VoodooI2CControllerBusMessage msgs[] = {
             {
                 .address = request->address,
+                .buffer = request->writeBuffer,
                 .flags = flags,
                 .length = request->writeLength,
-                .buffer = request->writeBuffer,
             },
             {
                 .address = request->address,
+                .buffer = request->readBuffer,
                 .flags = readFlags,
                 .length = request->readLength,
-                .buffer = request->readBuffer,
             }
         };
         ret = controller->transferI2C(msgs, 2);
     } else {
         VoodooI2CControllerBusMessage msg = {
             .address = request->address,
+            .buffer = hasWrite ? request->writeBuffer : request->readBuffer,
             .flags = hasWrite ? flags : readFlags,
             .length = hasWrite ? request->writeLength : request->readLength,
-            .buffer = hasWrite ? request->writeBuffer : request->readBuffer,
         };
         ret = controller->transferI2C(&msg, 1);
     }
