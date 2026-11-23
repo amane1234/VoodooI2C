@@ -265,6 +265,9 @@ void VoodooI2CControllerDriver::handleInterrupt(OSObject* target, void* refCon, 
 
 wakeup:
     if (((status & (DW_IC_INTR_TX_ABRT | DW_IC_INTR_STOP_DET)) || bus_device.message_error) && (bus_device.receive_outstanding == 0)) {
+        // Mark completion before waking up: prepareTransferI2C() checks the flag, so a wakeup that
+        // arrives before it went to sleep is no longer lost
+        __atomic_store_n(&bus_device.command_complete, true, __ATOMIC_RELEASE);
         command_gate->commandWakeup(&bus_device.command_complete);
     } else if (bus_device.access_intr_mask_workaround) {
         /* Workaround to trigger pending interrupt */
@@ -324,17 +327,35 @@ IOReturn VoodooI2CControllerDriver::prepareTransferI2C(VoodooI2CControllerBusMes
     bus_device.status = STATUS_IDLE;
     bus_device.abort_source = 0;
     bus_device.receive_outstanding = 0;
+    __atomic_store_n(&bus_device.command_complete, false, __ATOMIC_RELEASE);
 
     requestTransferI2C();
 
     /*
-     * Sleep timeout to prevent the caller from deadlock :
-     *   10ms is required, for example, when reading the HID descriptor for the first time.
-     *   Timeout is set to 100ms (10ms x 10 times)
+     * Wait up to 1 s for the transfer to complete (10 ms are needed e.g. when reading the HID
+     * descriptor for the first time).
+     *
+     * The interrupt handler can complete the transfer before this thread reaches commandSleep(). Its
+     * wakeup was then lost and every such transfer waited the full second and failed, i.e. a touchpad
+     * stall. Check the completion flag and sleep in 10 ms slices, so a lost wakeup costs at most 10 ms.
+     * THREAD_UNINT: an interrupted sleep used to be treated like a completed transfer.
      */
     nanoseconds_to_absolutetime(1000000000, &abstime);
     clock_absolutetime_interval_to_deadline(abstime, &deadline);
-    sleep = command_gate->commandSleep(&bus_device.command_complete, deadline, THREAD_INTERRUPTIBLE);
+    sleep = THREAD_AWAKENED;
+    while (!__atomic_load_n(&bus_device.command_complete, __ATOMIC_ACQUIRE)) {
+        AbsoluteTime now, slice, sliceDeadline;
+        clock_get_uptime(&now);
+        if (now >= deadline) {
+            sleep = THREAD_TIMED_OUT;
+            break;
+        }
+        nanoseconds_to_absolutetime(10000000, &slice);
+        sliceDeadline = now + slice;
+        if (sliceDeadline > deadline)
+            sliceDeadline = deadline;
+        command_gate->commandSleep(&bus_device.command_complete, sliceDeadline, THREAD_UNINT);
+    }
 
     if (sleep == THREAD_TIMED_OUT) {
         IOLog("%s::%s Timeout waiting for bus to accept transfer request\n", getName(), bus_device.name);
@@ -593,6 +614,8 @@ IOReturn VoodooI2CControllerDriver::setPowerState(unsigned long whichState, IOSe
 }
 
 bool VoodooI2CControllerDriver::start(IOService* provider) {
+    bool pm_initialised = false;
+
     if (!super::start(provider))
         return false;
     i2c_bus_lock = IOLockAlloc();
@@ -616,6 +639,7 @@ bool VoodooI2CControllerDriver::start(IOService* provider) {
     }
 
     PMinit();
+    pm_initialised = true;
     nub->joinPMtree(this);
     registerPowerDriver(this, VoodooI2CIOPMPowerStates, kVoodooI2CIOPMNumberPowerStates);
 
@@ -642,7 +666,7 @@ bool VoodooI2CControllerDriver::start(IOService* provider) {
 
     if (initialiseBus() != kIOReturnSuccess) {
         IOLog("%s::%s Could not initialise bus\n", getName(), bus_device.name);
-        return false;
+        goto exit;   // returning directly left the work loop, gate, lock and PM registration behind
     }
 
     toggleInterrupts(kVoodooI2CStateOff);
@@ -660,6 +684,8 @@ bool VoodooI2CControllerDriver::start(IOService* provider) {
     return true;
 exit:
     releaseResources();
+    if (pm_initialised)
+        PMstop();
     return false;
 }
 

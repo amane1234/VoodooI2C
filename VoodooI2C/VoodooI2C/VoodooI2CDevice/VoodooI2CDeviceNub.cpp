@@ -102,6 +102,12 @@ IOReturn VoodooI2CDeviceNub::evaluateDSM(const char *uuid, UInt32 index, OSObjec
         OSArray::withCapacity(1),
     };
 
+    if (!params[0] || !params[1] || !params[2] || !params[3]) {
+        for (auto &param : params)
+            OSSafeReleaseNULL(param);
+        return kIOReturnNoMemory;
+    }
+
     ret = acpi_device->evaluateObject("XDSM", result, params, 4);
     if (ret != kIOReturnSuccess) {
         ret = acpi_device->evaluateObject("_DSM", result, params, 4);
@@ -124,8 +130,9 @@ IOReturn VoodooI2CDeviceNub::getDeviceResourcesDSM(UInt32 index, OSObject **resu
 
     OSData *data = OSDynamicCast(OSData, *result);
 
-    if (!data) {
+    if (!data || data->getLength() < 1) {
         IOLog("%s::%s Could not get valid return for available TP7G indexes\n", getName(), acpi_device->getName());
+        OSSafeReleaseNULL(*result);
         return kIOReturnNotFound;
     }
 
@@ -274,8 +281,10 @@ VoodooGPIO* VoodooI2CDeviceNub::getGPIOController() {
 
     if (gpio_controller != NULL) {
         IOLog("%s::%s Got GPIO Controller! %s\n", getName(), acpi_device->getName(), gpio_controller->getName());
+        // Keep the reference from waitForMatchingService(): the controller is used for every interrupt
+        matched = nullptr;
     }
-    name_match->release();
+    OSSafeReleaseNULL(name_match);
     OSSafeReleaseNULL(matched);
 
     return gpio_controller;
@@ -294,7 +303,10 @@ IOWorkLoop* VoodooI2CDeviceNub::getWorkLoop(void) const {
 }
 
 IOReturn VoodooI2CDeviceNub::readI2C(UInt8* values, UInt16 length) {
-    return command_gate->attemptAction(OSMemberFunctionCast(IOCommandGate::Action, this, &VoodooI2CDeviceNub::readI2CGated), values, &length);
+    // runAction like writeI2C()/writeReadI2C(): attemptAction failed right away whenever another transfer
+    // held the gate (e.g. a feature report during touchpad setup or wake), dropping the input report or
+    // the reset acknowledgement
+    return command_gate->runAction(OSMemberFunctionCast(IOCommandGate::Action, this, &VoodooI2CDeviceNub::readI2CGated), values, &length);
 }
 
 IOReturn VoodooI2CDeviceNub::readI2CGated(UInt8* values, UInt16* length) {
@@ -334,6 +346,11 @@ void VoodooI2CDeviceNub::releaseResources() {
     OSSafeReleaseNULL(work_loop);
 }
 
+void VoodooI2CDeviceNub::free() {
+    OSSafeReleaseNULL(gpio_controller);
+    super::free();
+}
+
 bool VoodooI2CDeviceNub::start(IOService* provider) {
     if (!super::start(provider))
         return false;
@@ -351,7 +368,8 @@ bool VoodooI2CDeviceNub::start(IOService* provider) {
         goto exit;
     }
 
-    setProperty("IOName", reinterpret_cast<const char*>(OSDynamicCast(OSData, getProperty("name"))->getBytesNoCopy()));
+    if (auto nameData = OSDynamicCast(OSData, getProperty("name")))
+        setProperty("IOName", reinterpret_cast<const char*>(nameData->getBytesNoCopy()));
 
     registerService();
 

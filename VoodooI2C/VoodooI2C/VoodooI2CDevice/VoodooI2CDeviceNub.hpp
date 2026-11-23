@@ -291,6 +291,9 @@ class EXPORT VoodooI2CDeviceNub : public IOService {
 
     void releaseResources();
 
+    /* Releases the reference to the GPIO controller */
+    void free() override;
+
     /* Transmits an I2C write request to the slave device
      * @values A buffer containing the message to be written
      * @length The length of the message
