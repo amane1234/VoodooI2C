@@ -1,0 +1,208 @@
+diff --git a/VoodooGPIO/VoodooGPIOIntel.cpp b/VoodooGPIO/VoodooGPIOIntel.cpp
+index 6749a3e..0614d7a 100644
+--- a/VoodooGPIO/VoodooGPIOIntel.cpp
++++ b/VoodooGPIO/VoodooGPIOIntel.cpp
+@@ -300,6 +300,36 @@ void VoodooGPIOIntel::intel_gpio_irq_mask_unmask(unsigned pin, bool mask) {
+  * @param pin Hardware GPIO pin number to set its type.
+  * @param type Type to set.
+  */
++/* RXEVCFG, RXINV and PMODE as intel_gpio_irq_set_type() programs them for @type */
++static UInt32 intel_gpio_irq_type_bits(unsigned type) {
++    if ((type & IRQ_TYPE_EDGE_BOTH) == IRQ_TYPE_EDGE_BOTH)
++        return PADCFG0_RXEVCFG_EDGE_BOTH << PADCFG0_RXEVCFG_SHIFT;
++    if (type & IRQ_TYPE_EDGE_FALLING)
++        return (PADCFG0_RXEVCFG_EDGE << PADCFG0_RXEVCFG_SHIFT) | PADCFG0_RXINV;
++    if (type & IRQ_TYPE_EDGE_RISING)
++        return PADCFG0_RXEVCFG_EDGE << PADCFG0_RXEVCFG_SHIFT;
++    if (type & IRQ_TYPE_LEVEL_MASK)
++        return (type & IRQ_TYPE_LEVEL_LOW) ? PADCFG0_RXINV : 0;
++    return PADCFG0_RXEVCFG_DISABLED << PADCFG0_RXEVCFG_SHIFT;
++}
++
++#define PADCFG0_IRQ_TYPE_MASK (PADCFG0_RXEVCFG_MASK | PADCFG0_RXINV | PADCFG0_PMODE_MASK)
++
++/**
++ * Check whether the pad currently has the configuration @type needs.
++ * @param padcfg0 Receives the current PADCFG0 value (may be nullptr).
++ */
++bool VoodooGPIOIntel::intel_gpio_irq_type_applied(unsigned pin, unsigned type, UInt32 *padcfg0) {
++    IOVirtualAddress reg = intel_get_padcfg(pin, PADCFG0);
++    if (!reg)
++        return false;
++
++    UInt32 value = readl(reg);
++    if (padcfg0)
++        *padcfg0 = value;
++    return (value & PADCFG0_IRQ_TYPE_MASK) == intel_gpio_irq_type_bits(type);
++}
++
+ bool VoodooGPIOIntel::intel_gpio_irq_set_type(unsigned pin, unsigned type) {
+     IOVirtualAddress reg;
+     UInt32 value;
+@@ -338,9 +368,58 @@ bool VoodooGPIOIntel::intel_gpio_irq_set_type(unsigned pin, unsigned type) {
+     }
+ 
+     writel(value, reg);
++
++    /*
++     * A pad whose configuration the BIOS locked (PADCFGLOCK) silently ignores the
++     * write. Report that instead of claiming success.
++     */
++    UInt32 readback = readl(reg);
++    if ((readback & PADCFG0_IRQ_TYPE_MASK) != (value & PADCFG0_IRQ_TYPE_MASK)) {
++        IOLog("%s::Pad %u ignored IRQ type 0x%x (PADCFG0 0x%08x, wanted 0x%08x, lock %d)\n",
++              getName(), pin, type, readback, value, intel_pad_locked(pin));
++        return false;
++    }
+     return true;
+ }
+ 
++/**
++ * Make sure a registered pin is still owned by the GPIO driver and still has the
++ * IRQ type its client asked for. The BIOS reprograms pads on S3/S4 resume (often to
++ * its own APIC-routing defaults), so this runs after wake and before a client
++ * enables the interrupt.
++ *
++ * @param pin Hardware pin number.
++ * @param log Log the result even when nothing had to change.
++ */
++void VoodooGPIOIntel::intel_gpio_reprogram_pin(unsigned pin, bool log) {
++    struct intel_community *community = intel_get_community(pin);
++    if (!community || !community->interruptTypes)
++        return;
++
++    unsigned communityidx = pin - community->pin_base;
++    unsigned type = community->interruptTypes[communityidx];
++    if (!type)
++        return;
++
++    /* Takes host ownership back if the BIOS returned the pad to ACPI mode */
++    bool acpi = intel_pad_acpi_mode(pin);
++
++    UInt32 before = 0, after = 0;
++    bool was_ok = intel_gpio_irq_type_applied(pin, type, &before);
++    bool ok = was_ok;
++    if (!was_ok) {
++        intel_gpio_irq_set_type(pin, type);
++        ok = intel_gpio_irq_type_applied(pin, type, &after);
++    } else {
++        after = before;
++    }
++
++    if (log || !was_ok)
++        IOLog("%s::Pad %u type 0x%x: PADCFG0 0x%08x -> 0x%08x (%s%s)\n", getName(), pin, type, before, after,
++              was_ok ? "unchanged" : (ok ? "reprogrammed" : "reprogram FAILED, pad locked?"),
++              acpi ? ", still owned by ACPI" : "");
++}
++
+ bool VoodooGPIOIntel::intel_pinctrl_add_padgroups(intel_community *community) {
+     struct intel_padgroup *gpps;
+     unsigned padown_num = 0;
+@@ -591,6 +670,27 @@ void VoodooGPIOIntel::intel_pinctrl_resume() {
+             }
+         }
+     }
++
++    /*
++     * The context above is a snapshot from suspend. Clients usually disable their
++     * interrupt before the GPIO controller suspends, and on wake they may re-enable
++     * it before or after this runs (the GPIO controller and the I2C devices are in
++     * different branches of the power tree). Re-check each registered pin and set
++     * its enable bit from what the client asked for, not from the snapshot.
++     */
++    for (unsigned int idx = 0; idx < registered_pin_list->getCount(); idx++) {
++        OSNumber* registered_pin = OSDynamicCast(OSNumber, registered_pin_list->getObject(idx));
++        if (!registered_pin)
++            continue;
++
++        unsigned hw_pin = registered_pin->unsigned32BitValue();
++        struct intel_community *community = intel_get_community(hw_pin);
++        if (!community || !community->pinInterruptEnabled)
++            continue;
++
++        intel_gpio_reprogram_pin(hw_pin, true);
++        intel_gpio_irq_mask_unmask(hw_pin, !community->pinInterruptEnabled[hw_pin - community->pin_base]);
++    }
+ }
+ 
+ bool VoodooGPIOIntel::init(OSDictionary* properties) {
+@@ -694,6 +794,13 @@ bool VoodooGPIOIntel::start(IOService *provider) {
+         }
+         memset(communities[i].interruptTypes, 0, sizeof(unsigned) * communities[i].npins);
+ 
++        communities[i].pinInterruptEnabled = IONew(bool, communities[i].npins);
++        if (!communities[i].pinInterruptEnabled) {
++            IOLog("%s::Error allocating pinInterruptEnabled for community %d\n", getName(), i);
++            continue;
++        }
++        memset(communities[i].pinInterruptEnabled, 0, sizeof(bool) * communities[i].npins);
++
+         communities[i].pinInterruptRefcons = IONew(void *, communities[i].npins);
+         if (!communities[i].pinInterruptRefcons) {
+             IOLog("%s::Error allocating pinInterruptRefcons for community %d\n", getName(), i);
+@@ -762,6 +869,7 @@ void VoodooGPIOIntel::stop(IOService *provider) {
+         IOSafeDeleteNULL(communities[i].pinInterruptActionOwners, OSObject*, communities[i].npins);
+         IOSafeDeleteNULL(communities[i].pinInterruptAction, IOInterruptAction, communities[i].npins);
+         IOSafeDeleteNULL(communities[i].interruptTypes, unsigned, communities[i].npins);
++        IOSafeDeleteNULL(communities[i].pinInterruptEnabled, bool, communities[i].npins);
+         IOSafeDeleteNULL(communities[i].pinInterruptRefcons, void*, communities[i].npins);
+         OSSafeReleaseNULL(communities[i].mmap);
+     }
+@@ -963,6 +1071,8 @@ IOReturn VoodooGPIOIntel::unregisterInterrupt(int pin) {
+     community->pinInterruptAction[communityidx] = NULL;
+     community->interruptTypes[communityidx] = 0;
+     community->pinInterruptRefcons[communityidx] = NULL;
++    if (community->pinInterruptEnabled)
++        community->pinInterruptEnabled[communityidx] = false;
+ 
+     for (int i = registered_pin_list->getCount() - 1; i >= 0; i--) {
+         OSNumber* registered_pin = OSDynamicCast(OSNumber, registered_pin_list->getObject(i));
+@@ -988,6 +1098,11 @@ IOReturn VoodooGPIOIntel::enableInterrupt(int pin) {
+ 
+     unsigned communityidx = hw_pin - community->pin_base;
+     if (community->pinInterruptActionOwners[communityidx]) {
++        if (community->pinInterruptEnabled)
++            community->pinInterruptEnabled[communityidx] = true;
++        /* Cheap when nothing changed: one register read. Fixes the pad after a BIOS resume. */
++        if (!intel_gpio_irq_type_applied(hw_pin, community->interruptTypes[communityidx], nullptr))
++            intel_gpio_reprogram_pin(hw_pin, false);
+         intel_gpio_irq_mask_unmask(hw_pin, false);
+         return getProvider()->enableInterrupt(0);
+     }
+@@ -998,10 +1113,14 @@ IOReturn VoodooGPIOIntel::enableInterrupt(int pin) {
+  * @param pin 'Software' pin number (i.e. GpioInt).
+  */
+ IOReturn VoodooGPIOIntel::disableInterrupt(int pin) {
+-    SInt32 hw_pin = intel_gpio_to_pin(pin, nullptr, nullptr);
++    struct intel_community *community;
++    SInt32 hw_pin = intel_gpio_to_pin(pin, &community, nullptr);
+     if (hw_pin < 0)
+         return kIOReturnNoInterrupt;
+ 
++    if (community->pinInterruptEnabled)
++        community->pinInterruptEnabled[hw_pin - community->pin_base] = false;
++
+     intel_gpio_irq_mask_unmask(hw_pin, true);
+     return getProvider()->disableInterrupt(0);
+ }
+diff --git a/VoodooGPIO/VoodooGPIOIntel.hpp b/VoodooGPIO/VoodooGPIOIntel.hpp
+index 6e2aa65..8994825 100644
+--- a/VoodooGPIO/VoodooGPIOIntel.hpp
++++ b/VoodooGPIO/VoodooGPIOIntel.hpp
+@@ -112,6 +112,7 @@ struct intel_community {
+     IOVirtualAddress pad_regs;
+ 
+     unsigned *interruptTypes;
++    bool *pinInterruptEnabled;    /* client has the interrupt enabled (survives sleep) */
+     OSObject **pinInterruptActionOwners;
+     IOInterruptAction *pinInterruptAction;
+     void **pinInterruptRefcons;
+@@ -192,6 +193,8 @@ protected:
+                              struct intel_padgroup **padgrp);
+     void intel_gpio_irq_mask_unmask(unsigned pin, bool mask);
+     bool intel_gpio_irq_set_type(unsigned pin, unsigned type);
++    bool intel_gpio_irq_type_applied(unsigned pin, unsigned type, UInt32 *padcfg0);
++    void intel_gpio_reprogram_pin(unsigned pin, bool log);
+ 
+     bool intel_pinctrl_add_padgroups(intel_community *community);
+ 

@@ -34,6 +34,14 @@ jobs:
         run: |
           src=$(/usr/bin/curl -Lfs https://raw.githubusercontent.com/acidanthera/VoodooInput/master/VoodooInput/Scripts/bootstrap.sh) && eval "$src" && mv VoodooInput Dependencies
 
+      - name: Apply VoodooGPIO patches
+        run: |
+          for p in Patches/VoodooGPIO-*.patch; do
+            [ -e "$p" ] || continue
+            echo "Applying $p"
+            git -C Dependencies/VoodooGPIO apply "$GITHUB_WORKSPACE/$p"
+          done
+
       - name: Show workspace
         run: |
           echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
