@@ -237,7 +237,7 @@ class EXPORT VoodooI2CDeviceNub : public IOService {
     bool use_10bit_addressing {false};
     IOWorkLoop* work_loop = nullptr;
 
-    /* Check if a valid interrupt is available less than 0x2f
+    /* Check if an APIC interrupt is available (pins above 0x2f are accepted too)
      *
      * @return *kIOReturnSuccess* if the interrupt can be used
      */

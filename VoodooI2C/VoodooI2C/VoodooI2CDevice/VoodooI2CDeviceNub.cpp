@@ -194,12 +194,19 @@ IOReturn VoodooI2CDeviceNub::validateAPICInterrupt() {
     if ((interrupt_array = OSDynamicCast(OSArray, acpi_device->getProperty(gIOInterruptSpecifiersKey))) &&
         (interrupt_data = OSDynamicCast(OSData, interrupt_array->getObject(0))) &&
         (interrupt_pin = reinterpret_cast<const UInt16*>(interrupt_data->getBytesNoCopy(0, 1)))) {
-        if (*interrupt_pin <= 0x2f) {
-            has_apic_interrupts = true;
+        /*
+         * Accept APIC pins above 0x2f as well. On some machines (e.g. Dell Comet Lake-U,
+         * Alps touchpad on GPP_B3 / IRQ 0x33) the BIOS fully locks the pad configuration
+         * (PADCFGLOCK) for direct IOxAPIC routing with RXINV = 0, so VoodooGPIO cannot set
+         * the pad polarity for GPIO interrupts and the line storms while idle. The APIC
+         * route the BIOS set up works on those machines, so try it instead of refusing it.
+         */
+        has_apic_interrupts = true;
+        if (*interrupt_pin <= 0x2f)
             IOLog("%s::%s Found valid APIC interrupt pin (0x%x)\n", getName(), acpi_device->getName(), *interrupt_pin);
-            return kIOReturnSuccess;
-        }
-        IOLog("%s::%s Warning: Incompatible APIC interrupt pin (0x%x > 0x2f)\n", getName(), acpi_device->getName(), *interrupt_pin);
+        else
+            IOLog("%s::%s Using APIC interrupt pin above 0x2f (0x%x)\n", getName(), acpi_device->getName(), *interrupt_pin);
+        return kIOReturnSuccess;
     }
     return kIOReturnUnsupported;
 }
