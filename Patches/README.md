@@ -12,24 +12,11 @@ On S3/S4 resume the BIOS runs before macOS and reprograms GPIO pads, often to it
 - `intel_gpio_irq_set_type()` never read the pad back, so a write ignored by a locked pad was reported as success;
 - `enableInterrupt()` did not check the pad configuration.
 
-Changes:
+The GPIO work loop serializes client operations, interrupt delivery and power transitions. Each pin keeps its requested enable state separately from its hardware state. The shared parent line is enabled for the first armed pin and explicitly disabled for the last. Normal re-enables reuse the verified configuration. Sleep invalidates verification.
 
-- Track per pin whether the client has the interrupt enabled, and restore the enable bit from that state on resume instead of from the snapshot.
-- After resume, re-take host ownership and re-apply the IRQ type of every registered pin, then read it back and log the result.
-- `enableInterrupt()` re-applies the IRQ type if the pad no longer matches (one register read when nothing changed).
-- `intel_gpio_irq_set_type()` reads the pad back and returns failure, with a log line, if the write was ignored (pad locked by the BIOS).
+On resume the driver restores the interrupt-enable snapshot only for unmanaged pins. A requested GPIO pin must pass PAD_OWN, HOSTSW_OWN and IRQ-type checks before it can be unmasked. A locked or unowned pin stays masked; other pins continue. An explicit enable can retry later. Look for `host ownership unavailable`, `IRQ type ... rejected` or `remains masked after wake` in the kernel log.
 
-Log lines to look for after wake:
-
-```bash
-sudo dmesg | grep -E "Pad [0-9]+ type|ignored IRQ type|Woke up" | tail -10
-```
-
-- `reprogrammed`: the BIOS had changed the pad and VoodooGPIO restored it.
-- `unchanged`: the pad was already correct.
-- `reprogram FAILED, pad locked?` or `ignored IRQ type`: the BIOS locks the pad on resume. A driver cannot fix that; use APIC mode instead (see the main README).
-
-Status: syntax-checked against MacKernelSDK headers only. Not yet tested on hardware.
+Hardware validation is pending.
 
 ## Local build with the patches
 

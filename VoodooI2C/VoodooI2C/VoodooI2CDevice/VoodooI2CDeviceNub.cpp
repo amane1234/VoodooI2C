@@ -299,7 +299,11 @@ VoodooGPIO* VoodooI2CDeviceNub::getGPIOController() {
 
 IOReturn VoodooI2CDeviceNub::getInterruptType(int source, int* interrupt_type) {
     if (has_gpio_interrupts) {
-        return gpio_controller->getInterruptType(gpio_pin, interrupt_type);
+        // IOInterruptEventSource queries this before it registers its handler.
+        if (!interrupt_type)
+            return kIOReturnBadArgument;
+        *interrupt_type = (gpio_irq & IRQ_TYPE_LEVEL_MASK) ? kIOInterruptTypeLevel : kIOInterruptTypeEdge;
+        return kIOReturnSuccess;
     } else {
         return acpi_device->getInterruptType(source, interrupt_type);
     }
@@ -335,7 +339,9 @@ IOReturn VoodooI2CDeviceNub::readI2CGated(UInt8* values, UInt16* length) {
 
 IOReturn VoodooI2CDeviceNub::registerInterrupt(int source, OSObject *target, IOInterruptAction handler, void *refcon) {
     if (has_gpio_interrupts) {
-        gpio_controller->setInterruptTypeForPin(gpio_pin, gpio_irq);
+        IOReturn ret = gpio_controller->setInterruptTypeForPin(gpio_pin, gpio_irq);
+        if (ret != kIOReturnSuccess)
+            return ret;
         return gpio_controller->registerInterrupt(gpio_pin, target, handler, refcon);
     } else {
         return acpi_device->registerInterrupt(source, target, handler, refcon);
