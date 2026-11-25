@@ -257,14 +257,31 @@ void VoodooI2CControllerDriver::handleInterrupt(OSObject* target, void* refCon, 
         goto wakeup;
     }
 
-    if (status & DW_IC_INTR_RX_FULL)
+    if (status & DW_IC_INTR_STOP_DET) {
+        bus_device.status |= STATUS_STOP_SEEN;
+        if (bus_device.message_write_index != bus_device.message_number)
+            bus_device.message_error = -1;
+    }
+
+    if ((status & DW_IC_INTR_RX_FULL) ||
+        ((status & DW_IC_INTR_STOP_DET) && bus_device.receive_outstanding))
         readFromBus();
 
-    if (status & DW_IC_INTR_TX_EMPTY)
+    if (bus_device.message_error) {
+        writeRegister(0, DW_IC_INTR_MASK);
+    } else if (bus_device.status & STATUS_STOP_SEEN) {
+        // A final byte can become visible after STOP. Deliver even a short
+        // tail and remember STOP while waiting for the next RX interrupt.
+        if (bus_device.receive_outstanding)
+            writeRegister(0, DW_IC_RX_TL);
+    } else if (status & DW_IC_INTR_TX_EMPTY) {
         transferMessageToBus();
+    }
 
 wakeup:
-    if (((status & (DW_IC_INTR_TX_ABRT | DW_IC_INTR_STOP_DET)) || bus_device.message_error) && (bus_device.receive_outstanding == 0)) {
+    if (bus_device.command_error || bus_device.message_error ||
+        ((bus_device.status & STATUS_STOP_SEEN) && !bus_device.receive_outstanding)) {
+        bus_device.status &= ~STATUS_STOP_SEEN;
         // Mark completion before waking up: prepareTransferI2C() checks the flag, so a wakeup that
         // arrives before it went to sleep is no longer lost
         __atomic_store_n(&bus_device.command_complete, true, __ATOMIC_RELEASE);
@@ -471,7 +488,7 @@ UInt32 VoodooI2CControllerDriver::readClearInterruptBits() {
         readRegister(DW_IC_CLR_RX_DONE);
     if (stat & DW_IC_INTR_ACTIVITY)
         readRegister(DW_IC_CLR_ACTIVITY);
-    if ((stat & DW_IC_INTR_STOP_DET) && ((bus_device.receive_outstanding == 0) || (stat & DW_IC_INTR_RX_FULL)))
+    if (stat & DW_IC_INTR_STOP_DET)
         readRegister(DW_IC_CLR_STOP_DET);
     if (stat & DW_IC_INTR_START_DET)
         readRegister(DW_IC_CLR_START_DET);
@@ -484,6 +501,12 @@ UInt32 VoodooI2CControllerDriver::readClearInterruptBits() {
 void VoodooI2CControllerDriver::readFromBus() {
     VoodooI2CControllerBusMessage *messages = bus_device.messages;
     int receive_valid;
+
+    receive_valid = readRegister(DW_IC_RXFLR);
+    if (receive_valid < 0 || receive_valid > bus_device.receive_outstanding) {
+        bus_device.message_error = -1;
+        return;
+    }
 
     for (; bus_device.message_read_index < bus_device.message_number; bus_device.message_read_index++) {
         UInt32 length;
@@ -502,9 +525,6 @@ void VoodooI2CControllerDriver::readFromBus() {
             length = bus_device.receive_buffer_length;
             buffer = bus_device.receive_buffer;
         }
-
-        /** check how many items left in receive buffer */
-        receive_valid = readRegister(DW_IC_RXFLR);
 
         /** collect data from receive buffer */
         for (; length > 0 && receive_valid > 0; length--, receive_valid--) {
@@ -603,12 +623,16 @@ IOReturn VoodooI2CControllerDriver::setPowerState(unsigned long whichState, IOSe
         }
     } else {
         if (!bus_device.awake) {
-            toggleBusState(kVoodooI2CStateOn);
-            initialiseBus();
-            toggleInterrupts(kVoodooI2CStateOff);
-            bus_device.awake = true;
-            startI2CInterrupt();
-            IOLog("%s::%s Woke up\n", getName(), bus_device.name);
+            IOReturn ret = toggleBusState(kVoodooI2CStateOn);
+            if (ret == kIOReturnSuccess)
+                ret = initialiseBus();
+            if (ret == kIOReturnSuccess) {
+                toggleInterrupts(kVoodooI2CStateOff);
+                ret = startI2CInterrupt();
+            }
+            bus_device.awake = ret == kIOReturnSuccess;
+            if (!bus_device.awake)
+                IOLog("%s::%s Controller wake failed: 0x%x\n", getName(), bus_device.name, ret);
         }
     }
     IOLockUnlock(i2c_bus_lock);
@@ -715,17 +739,23 @@ void VoodooI2CControllerDriver::stop(IOService* provider) {
 }
 
 IOReturn VoodooI2CControllerDriver::toggleBusState(VoodooI2CState enabled) {
-    int timeout = 1000;
-
+    AbsoluteTime deadline, now;
+    clock_interval_to_deadline(250, kMillisecondScale, &deadline);
+    unsigned spins = 0;
     do {
         writeRegister(enabled, DW_IC_ENABLE);
-
-        if ((readRegister(DW_IC_ENABLE_STATUS) & 1) == enabled) {
+        if ((readRegister(DW_IC_ENABLE_STATUS) & 1) == enabled)
             return kIOReturnSuccess;
+        if (spins < 4) {
+            ++spins;
+            IODelay(25);
+        } else {
+            IOSleep(1);
         }
-
-        IODelay(250);
-    } while (timeout--);
+        clock_get_uptime(&now);
+    } while (now < deadline);
+    if ((readRegister(DW_IC_ENABLE_STATUS) & 1) == enabled)
+        return kIOReturnSuccess;
 
     IOLog("%s::%s Timed out waiting for bus to change state\n", getName(), bus_device.name);
     return kIOReturnTimeout;
@@ -866,7 +896,7 @@ void VoodooI2CControllerDriver::transferMessageToBus() {
 }
 
 IOReturn VoodooI2CControllerDriver::waitBusNotBusyI2C() {
-    int timeout = TIMEOUT * 150, firstDelay = 100;
+    int timeout = TIMEOUT * 150, short_polls = 4;
 
     while (readRegister(DW_IC_STATUS) & DW_IC_STATUS_ACTIVITY) {
         if (timeout <= 0) {
@@ -874,8 +904,8 @@ IOReturn VoodooI2CControllerDriver::waitBusNotBusyI2C() {
             return kIOReturnBusy;
         }
         timeout--;
-        if (firstDelay-- >= 0)
-            IODelay(100);
+        if (short_polls-- > 0)
+            IODelay(25);
         else
             IOSleep(1);
     }
@@ -889,8 +919,11 @@ IOReturn VoodooI2CControllerDriver::startI2CInterrupt() {
     }
     IOReturn ret = nub->registerInterrupt(0, this, OSMemberFunctionCast(IOInterruptAction, this, &VoodooI2CControllerDriver::handleInterrupt), 0);
     if (ret == kIOReturnSuccess) {
-        nub->enableInterrupt(0);
-        is_interrupt_registered = true;
+        ret = nub->enableInterrupt(0);
+        if (ret == kIOReturnSuccess)
+            is_interrupt_registered = true;
+        else
+            nub->unregisterInterrupt(0);
     } else {
         IOLog("%s::%s::Could not register I2C interrupt\n", getName(), bus_device.name);
     }
