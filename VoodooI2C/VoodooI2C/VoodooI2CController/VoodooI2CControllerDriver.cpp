@@ -577,6 +577,8 @@ void VoodooI2CControllerDriver::requestTransferI2C() {
     writeRegister(messages[bus_device.message_write_index].address | i2c_target, DW_IC_TAR);
 
     toggleInterrupts(kVoodooI2CStateOff);
+    // A previous read may have raised the threshold for its final batch.
+    writeRegister(0, DW_IC_RX_TL);
 
     toggleBusState(kVoodooI2CStateOn);
 
@@ -749,6 +751,18 @@ IOReturn VoodooI2CControllerDriver::transferI2C(VoodooI2CControllerBusMessage* m
 }
 
 IOReturn VoodooI2CControllerDriver::transferI2CGated(VoodooI2CControllerBusMessage* messages, int* number) {
+    if (!messages || *number <= 0)
+        return kIOReturnBadArgument;
+
+    // IC_TAR is programmed once for the whole transfer. Reject unsupported
+    // message lists before issuing a partial transaction on the bus.
+    for (int i = 0; i < *number; ++i) {
+        if (!messages[i].length || messages[i].address != messages[0].address)
+            return kIOReturnError;
+        if (!messages[i].buffer)
+            return kIOReturnBadArgument;
+    }
+
     IOReturn ret;
     int tries;
 
@@ -765,44 +779,33 @@ void VoodooI2CControllerDriver::transferMessageToBus() {
     VoodooI2CControllerBusMessage *messages = bus_device.messages;
     UInt32 interrupt_mask;
     int transaction_limit, receive_limit;
-    UInt32 address = messages[bus_device.message_write_index].address;
     UInt32 buffer_length = bus_device.transaction_buffer_length;
     UInt8 *buffer = bus_device.transaction_buffer;
-    bool need_restart = false;
 
     interrupt_mask = DW_IC_INTR_DEFAULT_MASK;
 
     for (; bus_device.message_write_index < bus_device.message_number; bus_device.message_write_index++) {
-        /*
-         * if target address has changed, we need to
-         * reprogram the target address in the i2c
-         * adapter when we are done with this transfer
-         */
-        if (messages[bus_device.message_write_index].address != address) {
-            bus_device.message_error = -1;
-            break;
-        }
-
-        if (messages[bus_device.message_write_index].length == 0) {
-            bus_device.message_error = -1;
-            break;
-        }
-
+        const auto& message = messages[bus_device.message_write_index];
         if (!(bus_device.status & STATUS_WRITE_IN_PROGRESS)) {
-            buffer = messages[bus_device.message_write_index].buffer;
-            buffer_length = messages[bus_device.message_write_index].length;
-
-            /* If both IC_EMPTYFIFO_HOLD_MASTER_EN and
-             * IC_RESTART_EN are set, we must manually
-             * set restart bit between messages.
-             */
-            if ((bus_device.bus_config & DW_IC_CON_RESTART_EN) && (bus_device.message_write_index > 0)) {
-                need_restart = true;
-            }
+            buffer = message.buffer;
+            buffer_length = message.length;
         }
 
+        // No command may have fit on the previous interrupt. Attach RESTART
+        // to the first command actually queued for each subsequent message.
+        bool need_restart = (bus_device.bus_config & DW_IC_CON_RESTART_EN) &&
+                            bus_device.message_write_index > 0 && buffer_length == message.length;
+        const bool is_read = message.flags & I2C_M_RD;
         transaction_limit = bus_device.transaction_fifo_depth - readRegister(DW_IC_TXFLR);
         receive_limit = bus_device.receive_fifo_depth - readRegister(DW_IC_RXFLR);
+
+        // Outstanding reads include both queued commands and unread RX data.
+        // Limit the batch by each constraint independently.
+        if (is_read) {
+            const int credits = static_cast<int>(bus_device.receive_fifo_depth) - bus_device.receive_outstanding;
+            if (receive_limit > credits)
+                receive_limit = credits;
+        }
 
         while (buffer_length > 0 && transaction_limit > 0 && receive_limit > 0) {
             UInt32 command = 0;
@@ -822,11 +825,7 @@ void VoodooI2CControllerDriver::transferMessageToBus() {
                 command |= 0x400;
                 need_restart = false;
             }
-            if (messages[bus_device.message_write_index].flags & I2C_M_RD) {
-                /* avoid rx buffer overrun */
-                if (receive_limit - bus_device.receive_outstanding <= 0) {
-                    break;
-                }
+            if (is_read) {
                 writeRegister(command | 0x100, DW_IC_DATA_CMD);
                 receive_limit--;
                 bus_device.receive_outstanding++;
@@ -853,6 +852,10 @@ void VoodooI2CControllerDriver::transferMessageToBus() {
      */
     if (bus_device.message_write_index == bus_device.message_number) {
         interrupt_mask &= ~DW_IC_INTR_TX_EMPTY;
+        // All commands are queued. RX_FULL can now wait for the rest of the
+        // read, including a short tail, without delaying further TX refills.
+        if (bus_device.receive_outstanding > 1)
+            writeRegister(bus_device.receive_outstanding - 1, DW_IC_RX_TL);
     }
 
     if (bus_device.message_error) {
