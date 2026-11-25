@@ -28,7 +28,7 @@ class EXPORT VoodooI2CNativeEngine : public VoodooI2CMultitouchEngine {
     IOService* voodooInputInstance;
 
     bool lastIsForceClickEnabled = false;
-    AbsoluteTime lastForceClickPropertyUpdateTime;
+    AbsoluteTime nextForceClickPropertyLookup = 0;
 
     bool isForceClickEnabled();
  public:
@@ -42,8 +42,6 @@ class EXPORT VoodooI2CNativeEngine : public VoodooI2CMultitouchEngine {
     bool willTerminate(IOService* provider, IOOptionBits options) override;
     
     MultitouchReturn handleInterruptReport(VoodooI2CMultitouchEvent event, AbsoluteTime timestamp);
- private:
-    int stylus_check = 0;
 };
 
 
