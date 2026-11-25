@@ -16,22 +16,31 @@ MultitouchReturn VoodooI2CNativeEngine::handleInterruptReport(VoodooI2CMultitouc
         return MultitouchReturnContinue;
     }
 
-    message.timestamp = timestamp;
-    message.contact_count = event.contact_count;
-    memset(message.transducers, 0, VOODOO_INPUT_MAX_TRANSDUCERS * sizeof(VoodooInputTransducer));
-    
-    VoodooI2CDigitiserTransducer* firstTransducer = (VoodooI2CDigitiserTransducer*) event.transducers->getObject(0);
+    if (!event.transducers)
+        return MultitouchReturnBreak;
 
+    auto* firstTransducer = static_cast<VoodooI2CDigitiserTransducer*>(event.transducers->getObject(0));
     if (!firstTransducer)
         return MultitouchReturnBreak;
-    
-    if (firstTransducer->type == kDigitiserTransducerStylus)
-        stylus_check = 1;
 
+    const unsigned int firstFinger = firstTransducer->type == kDigitiserTransducerStylus ? 1 : 0;
+    const unsigned int available = event.transducers->getCount() - firstFinger;
+    unsigned int count = event.contact_count;
+    if (count > available)
+        count = available;
+    if (count > VOODOO_INPUT_MAX_TRANSDUCERS)
+        count = VOODOO_INPUT_MAX_TRANSDUCERS;
+
+    message.timestamp = timestamp;
+    message.contact_count = static_cast<UInt8>(count);
+    memset(message.transducers, 0, sizeof(message.transducers));
+
+    const bool buttonDown = firstTransducer->physical_button.value() != 0;
+    const bool emulateForceClick = count && buttonDown && !firstTransducer->has_secondary_button && isForceClickEnabled();
     int valid_touch_count = 0;
 
-    for (int i = 0; i < event.contact_count; i++) {
-        VoodooI2CDigitiserTransducer* transducer = (VoodooI2CDigitiserTransducer*) event.transducers->getObject(i+stylus_check);
+    for (unsigned int i = 0; i < count; ++i) {
+        auto* transducer = static_cast<VoodooI2CDigitiserTransducer*>(event.transducers->getObject(firstFinger + i));
         VoodooInputTransducer* inputTransducer = &message.transducers[i];
         
         if (!transducer) {
@@ -73,7 +82,7 @@ MultitouchReturn VoodooI2CNativeEngine::handleInterruptReport(VoodooI2CMultitouc
         // Force Touch emulation
         // The button state is saved in the first transducer
         // Disable Force Touch emulation for two-button trackpads
-        if (!firstTransducer->has_secondary_button && firstTransducer->physical_button.value() && isForceClickEnabled()) {
+        if (emulateForceClick) {
             inputTransducer->supportsPressure = true;
             inputTransducer->isPhysicalButtonDown = false;
             inputTransducer->currentCoordinates.pressure = 0xff;
@@ -82,11 +91,11 @@ MultitouchReturn VoodooI2CNativeEngine::handleInterruptReport(VoodooI2CMultitouc
     }
     
     // set the thumb to improve 4F pinch and spread gesture and cross-screen dragging
-    if (valid_touch_count >= 4 || firstTransducer->physical_button.value()) {
+    if (count && (valid_touch_count >= 4 || buttonDown)) {
         // simple thumb detection: to find the lowest finger touch in the vertical direction.
         UInt32 y_max = 0;
-        int thumb_index = 0;
-        for (int i = 0; i < event.contact_count; i++) {
+        unsigned int thumb_index = 0;
+        for (unsigned int i = 0; i < count; ++i) {
             VoodooInputTransducer* inputTransducer = &message.transducers[i];
             if (inputTransducer->isValid && inputTransducer->currentCoordinates.y >= y_max) {
                 y_max = inputTransducer->currentCoordinates.y;
@@ -129,62 +138,34 @@ bool VoodooI2CNativeEngine::start(IOService* provider) {
 
     setProperty("VoodooInputSupported", kOSBooleanTrue);
     
-    stylus_check = 0;
+    nextForceClickPropertyLookup = 0;
 
     return true;
 }
 
 bool VoodooI2CNativeEngine::isForceClickEnabled() {
-    AbsoluteTime now_abs;
-    uint64_t diff_ns;
-    clock_get_uptime(&now_abs);
-    absolutetime_to_nanoseconds(now_abs - lastForceClickPropertyUpdateTime, &diff_ns);
-
-    if (diff_ns < 1e9) {
-        lastForceClickPropertyUpdateTime = now_abs;
+    AbsoluteTime now;
+    clock_get_uptime(&now);
+    if (now < nextForceClickPropertyLookup)
         return lastIsForceClickEnabled;
-    }
-    
-    // Blocking reading here takes about 10 microseconds
-    OSDictionary* dict = OSDynamicCast(OSDictionary, this->getProperty("MultitouchPreferences", gIOServicePlane, kIORegistryIterateRecursively));
-    if (!dict) {
-        return lastIsForceClickEnabled;
-    }
-    if (OSCollectionIterator* i = OSCollectionIterator::withCollection(dict)) {
-        while (OSSymbol* key = OSDynamicCast(OSSymbol, i->getNextObject())) {
-            // If tap to click (property "Clicking") is disabled,
-            // then we should forbid force clicking,
-            // because it makes impossible to perform a non-force click
-            if (key->isEqualTo("Clicking")) {
-                OSBoolean *boolValue;
-                OSNumber *numValue;
-                if ((boolValue = OSDynamicCast(OSBoolean, dict->getObject(key))) != nullptr) {
-                    if (!boolValue->getValue()) {
-                        lastIsForceClickEnabled = false;
-                        break;
-                    }
-                }
-                // is it needed? in default properties it's number, not boolean
-                else if ((numValue = OSDynamicCast(OSNumber, dict->getObject(key))) != nullptr && !numValue->unsigned64BitValue()) {
-                    lastIsForceClickEnabled = false;
-                    break;
-                }
-            }
-            // System -> Preferences -> Trackpad -> Force Click and haptic feedback
-            // ForceSuppressed
-            if (key->isEqualTo("ForceSuppressed")) {
-                OSBoolean* value = OSDynamicCast(OSBoolean, dict->getObject(key));
 
-                if (value != nullptr) {
-                    lastIsForceClickEnabled = !value->getValue();
-                }
-            }
+    AbsoluteTime interval;
+    nanoseconds_to_absolutetime(1000000000ULL, &interval);
+    nextForceClickPropertyLookup = now + interval;
+
+    OSObject* preferences = copyProperty("MultitouchPreferences", gIOServicePlane, kIORegistryIterateRecursively);
+    if (auto* dict = OSDynamicCast(OSDictionary, preferences)) {
+        OSObject* clicking = dict->getObject("Clicking");
+        auto* clickingBool = OSDynamicCast(OSBoolean, clicking);
+        auto* clickingNumber = OSDynamicCast(OSNumber, clicking);
+        if ((clickingBool && !clickingBool->getValue()) ||
+            (clickingNumber && !clickingNumber->unsigned64BitValue())) {
+            lastIsForceClickEnabled = false;
+        } else if (auto* suppressed = OSDynamicCast(OSBoolean, dict->getObject("ForceSuppressed"))) {
+            lastIsForceClickEnabled = !suppressed->getValue();
         }
-
-        i->release();
     }
-
-    lastForceClickPropertyUpdateTime = now_abs;
+    OSSafeReleaseNULL(preferences);
     return lastIsForceClickEnabled;
 }
 

@@ -4,7 +4,7 @@ Patches for submodules that this fork does not have its own copy of. `.github/wo
 
 ## VoodooGPIO-wake-reprogram.patch
 
-Re-programs GPIO interrupt pads after S3/S4 resume. Applies to VoodooGPIO `d415406` (the submodule commit).
+Re-programs GPIO interrupt pads after S3/S4 resume. Applies to VoodooGPIO `44fc744` (the submodule commit; same tree as the earlier `d415406`).
 
 On S3/S4 resume the BIOS runs before macOS and reprograms GPIO pads, often to its own defaults (for example ACPI ownership and APIC-routing polarity when the BIOS "Interrupt mode" setting is APIC). VoodooGPIO restored a snapshot taken at suspend, but:
 
